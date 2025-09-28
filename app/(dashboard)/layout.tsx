@@ -1,243 +1,190 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { useRouter, usePathname } from 'next/navigation'
+import { useState } from 'react'
+import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
-import { 
-  LayoutDashboard, Upload, Settings, LogOut,
-  Menu, X, Building2, Shield, User, Loader2
-} from 'lucide-react'
+import { Shield, Loader2, AlertCircle, Building2, Key, ChevronRight } from 'lucide-react'
 
-export default function DashboardLayout({
-  children,
-}: {
-  children: React.ReactNode
-}) {
-  const [company, setCompany] = useState<any>(null)
-  const [user, setUser] = useState<any>(null)
-  const [establishment, setEstablishment] = useState<any>(null)
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false)
-  const [loading, setLoading] = useState(true)
+export default function CompanyLoginPage() {
+  const [accessToken, setAccessToken] = useState('')
+  const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const router = useRouter()
-  const pathname = usePathname()
   const supabase = createClient()
 
-  useEffect(() => {
-    initializeAuth()
-  }, [])
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setIsLoading(true)
+    setError(null)
 
-  const initializeAuth = async () => {
     try {
-      setLoading(true)
-
-      // Get current Supabase user session
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession()
-      
-      if (sessionError) {
-        console.error('Session error:', sessionError)
-        router.push('/login')
-        return
-      }
-
-      if (!session?.user) {
-        console.log('No active session found')
-        router.push('/login')
-        return
-      }
-
-      setUser(session.user)
-
-      // Load company data for this user
-      const { data: companyData, error: companyError } = await supabase
+      // Validate access token
+      const { data: company, error: companyError } = await supabase
         .from('entreprises')
-        .select(`
-          *,
-          etablissements (*)
-        `)
-        .eq('user_id', session.user.id)
+        .select('*')
+        .eq('access_token', accessToken.trim())
+        .eq('subscription_status', 'active')
         .single()
 
-      if (companyError || !companyData) {
-        console.error('Company load error:', companyError)
-        // User authenticated but no company - redirect to setup or contact support
-        router.push('/login?error=no-company')
-        return
+      if (companyError || !company) {
+        throw new Error('Code d\'accès invalide ou expiré')
       }
 
-      setCompany(companyData)
-
-      // Set default establishment
-      const establishments = companyData.etablissements || []
-      const defaultEst = establishments.find((e: any) => e.is_headquarters) || establishments[0]
-      if (defaultEst) {
-        setEstablishment(defaultEst)
+      // Check if subscription is still valid
+      if (company.trial_ends_at && new Date(company.trial_ends_at) < new Date()) {
+        throw new Error('Votre période d\'essai a expiré')
       }
 
-      // Update company session in localStorage for compatibility
+      // Create session
       const sessionData = {
-        company_id: companyData.id,
-        company_name: companyData.nom,
-        user_id: session.user.id,
-        subscription_plan: companyData.subscription_plan,
-        subscription_status: companyData.subscription_status
+        company_id: company.id,
+        company_name: company.nom,
+        subscription_plan: company.subscription_plan,
+        features: company.features,
+        expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
       }
+
+      // Store in localStorage and cookie
       localStorage.setItem('company_session', JSON.stringify(sessionData))
+      document.cookie = `company_session=${btoa(JSON.stringify(sessionData))}; path=/; max-age=86400`
 
-    } catch (error) {
-      console.error('Auth initialization error:', error)
-      router.push('/login')
-    } finally {
-      setLoading(false)
-    }
-  }
+      // Update last login
+      await supabase
+        .from('entreprises')
+        .update({ 
+          last_login_at: new Date().toISOString(),
+          login_count: (company.login_count || 0) + 1,
+          last_activity_at: new Date().toISOString()
+        })
+        .eq('id', company.id)
 
-  const handleLogout = async () => {
-    try {
-      // Sign out from Supabase
-      const { error } = await supabase.auth.signOut()
-      if (error) {
-        console.error('Logout error:', error)
-      }
+      // Log access
+      await supabase
+        .from('access_logs')
+        .insert({
+          entreprise_id: company.id,
+          access_token_used: accessToken.substring(0, 8) + '...',
+          access_method: 'token',
+          path_accessed: '/login',
+          action: 'login_success',
+          response_status: 200
+        })
 
-      // Clear local storage
-      localStorage.removeItem('company_session')
+      router.push('/dashboard')
+    } catch (err: any) {
+      setError(err.message || 'Erreur de connexion')
       
-      // Redirect to login
-      router.push('/login')
-    } catch (error) {
-      console.error('Logout error:', error)
-      // Force redirect even if logout fails
-      router.push('/login')
+      // Log failed attempt
+      await supabase
+        .from('access_logs')
+        .insert({
+          access_token_used: accessToken.substring(0, 8) + '...',
+          access_method: 'token',
+          path_accessed: '/login',
+          action: 'login_failed',
+          response_status: 401
+        })
+    } finally {
+      setIsLoading(false)
     }
-  }
-
-  const navigation = [
-    { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-    { name: 'Import', href: '/import', icon: Upload },
-    { name: 'Paramètres', href: '/settings', icon: Settings },
-  ]
-
-  // Loading state
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-950 to-slate-900 flex items-center justify-center">
-        <div className="text-center">
-          <Loader2 size={48} className="text-purple-500 animate-spin mx-auto mb-4" />
-          <p className="text-white text-xl">Chargement...</p>
-        </div>
-      </div>
-    )
-  }
-
-  // Not authenticated or no company
-  if (!user || !company) {
-    return null // Will redirect in useEffect
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-950 to-slate-900">
-      {/* Main Navigation Sidebar - Always Visible */}
-      <aside className={`fixed inset-y-0 left-0 z-50 w-64 bg-slate-900/50 backdrop-blur-xl border-r border-slate-800 transform transition-transform ${
-        isSidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
-      }`}>
-        <div className="p-6 border-b border-slate-800">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-gradient-to-br from-cyan-500 to-purple-600 rounded-xl flex items-center justify-center">
-              <Shield size={24} className="text-white" />
-            </div>
+    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 flex items-center justify-center p-4">
+      {/* Background effects */}
+      <div className="fixed inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-cyan-500/10 rounded-full blur-3xl animate-pulse" />
+        <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-purple-500/10 rounded-full blur-3xl animate-pulse" style={{ animationDelay: '2s' }} />
+      </div>
+
+      <div className="relative w-full max-w-md">
+        {/* Logo and title */}
+        <div className="text-center mb-8">
+          <div className="inline-flex items-center justify-center w-20 h-20 bg-gradient-to-br from-cyan-500 to-purple-600 rounded-3xl mb-6 shadow-2xl shadow-purple-500/20">
+            <Shield size={40} className="text-white" />
+          </div>
+          <h1 className="text-4xl font-bold text-white mb-2">
+            Accès Entreprise
+          </h1>
+          <p className="text-slate-400">
+            Connectez-vous avec votre code d'accès sécurisé
+          </p>
+        </div>
+
+        {/* Login form */}
+        <div className="bg-slate-900/50 backdrop-blur-xl border border-slate-800 rounded-2xl p-8">
+          <form onSubmit={handleLogin} className="space-y-6">
             <div>
-              <h2 className="text-white font-bold truncate">{company.nom}</h2>
-              <p className="text-xs text-slate-400 capitalize">{company.subscription_plan}</p>
+              <label className="flex items-center gap-2 text-sm font-medium text-slate-300 mb-2">
+                <Key size={16} />
+                Code d'accès
+              </label>
+              <input
+                type="password"
+                value={accessToken}
+                onChange={(e) => setAccessToken(e.target.value)}
+                placeholder="Entrez votre code d'accès"
+                className="w-full px-4 py-3 bg-slate-800/50 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-transparent transition-all"
+                required
+                disabled={isLoading}
+                autoComplete="off"
+                minLength={32}
+              />
+              <p className="mt-2 text-xs text-slate-500">
+                Le code d'accès vous a été fourni par email lors de l'activation
+              </p>
             </div>
-          </div>
-        </div>
 
-        <nav className="p-4 space-y-1">
-          {navigation.map((item) => {
-            const isActive = pathname === item.href
-            return (
-              <Link
-                key={item.name}
-                href={item.href}
-                className={`flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-                  isActive 
-                    ? 'bg-gradient-to-r from-cyan-500/20 to-purple-600/20 text-white border border-cyan-500/30' 
-                    : 'text-slate-300 hover:text-white hover:bg-slate-800'
-                }`}
-              >
-                <item.icon size={20} />
-                <span>{item.name}</span>
-              </Link>
-            )
-          })}
-        </nav>
-
-        <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-slate-800">
-          {/* User info */}
-          <div className="flex items-center gap-3 mb-4 px-4 py-2 bg-slate-800/30 rounded-lg">
-            <div className="w-8 h-8 bg-gradient-to-br from-purple-500 to-cyan-500 rounded-full flex items-center justify-center text-white text-sm font-bold">
-              {user.email?.charAt(0).toUpperCase() || 'U'}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-white text-sm font-medium truncate">{user.email}</p>
-              <p className="text-slate-400 text-xs">Connecté</p>
-            </div>
-          </div>
-
-          <button
-            onClick={handleLogout}
-            className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg transition-colors"
-          >
-            <LogOut size={20} />
-            <span>Déconnexion</span>
-          </button>
-        </div>
-      </aside>
-
-      {/* Mobile Sidebar Overlay */}
-      {isSidebarOpen && (
-        <div className="fixed inset-0 z-40 lg:hidden">
-          <div className="fixed inset-0 bg-gray-900/80 backdrop-blur-sm" onClick={() => setIsSidebarOpen(false)} />
-        </div>
-      )}
-
-      {/* Main Content Area */}
-      <div className="lg:pl-64">
-        {/* Header */}
-        <header className="bg-slate-900/50 backdrop-blur-xl border-b border-slate-800 px-6 py-4">
-          <div className="flex items-center justify-between">
-            <button
-              onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-              className="lg:hidden text-slate-400 hover:text-white"
-            >
-              {isSidebarOpen ? <X size={24} /> : <Menu size={24} />}
-            </button>
-            
-            <div className="flex items-center gap-4 ml-auto">
-              {/* Trial warning */}
-              {company.subscription_plan === 'trial' && company.trial_ends_at && (
-                <div className="px-3 py-1 bg-yellow-500/20 text-yellow-400 border border-yellow-500/30 rounded-lg text-sm">
-                  Trial ends: {new Date(company.trial_ends_at).toLocaleDateString()}
-                </div>
-              )}
-
-              {/* Subscription status */}
-              <div className={`px-3 py-1 rounded-lg text-sm font-medium ${
-                company.subscription_status === 'active' 
-                  ? 'bg-green-500/20 text-green-400 border border-green-500/30'
-                  : 'bg-orange-500/20 text-orange-400 border border-orange-500/30'
-              }`}>
-                {company.subscription_status}
+            {error && (
+              <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-xl flex items-start gap-3">
+                <AlertCircle size={20} className="text-red-400 flex-shrink-0 mt-0.5" />
+                <div className="text-sm text-red-400">{error}</div>
               </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={isLoading || !accessToken}
+              className="w-full px-6 py-3 bg-gradient-to-r from-cyan-500 to-purple-600 hover:from-cyan-400 hover:to-purple-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-white font-semibold transition-all transform hover:scale-105 flex items-center justify-center gap-2"
+            >
+              {isLoading ? (
+                <>
+                  <Loader2 size={20} className="animate-spin" />
+                  Connexion...
+                </>
+              ) : (
+                <>
+                  Accéder au Dashboard
+                  <ChevronRight size={20} />
+                </>
+              )}
+            </button>
+          </form>
+
+          <div className="mt-8 pt-6 border-t border-slate-800">
+            <div className="text-center space-y-4">
+              <p className="text-sm text-slate-400">
+                Pas encore client ?
+              </p>
+              
+               <Link
+  href="/demo"
+  className="inline-flex items-center gap-2 px-6 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-white font-medium transition-all"
+>
+  <Building2 size={16} />
+  Demander une démo
+</Link>
             </div>
           </div>
-        </header>
+        </div>
 
-        {/* Page Content */}
-        <main className="p-6">
-          {children}
-        </main>
+        {/* Security note */}
+        <div className="mt-6 text-center">
+          <p className="text-xs text-slate-500">
+            Connexion sécurisée • Données chiffrées • Conforme RGPD
+          </p>
+        </div>
       </div>
     </div>
   )
