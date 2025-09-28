@@ -5,7 +5,7 @@ import { createClient } from '@/lib/supabase/client'
 import { motion, AnimatePresence } from 'framer-motion'
 import { 
   Building2, Calendar, ChevronDown, Sparkles, Brain,
-  AlertTriangle, RefreshCw, Zap, BarChart3, X
+  AlertTriangle, RefreshCw, Zap, BarChart3, X, LogOut
 } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 import ReactDOM from 'react-dom'
@@ -16,11 +16,25 @@ import { CyberWorkforceSection } from '@/components/dashboard/CyberWorkforceSect
 import { CyberPayrollSection } from '@/components/dashboard/CyberPayrollSection'
 import { CyberAbsenceSection } from '@/components/dashboard/CyberAbsenceSection'
 import { CyberDemographicsSection } from '@/components/dashboard/CyberDemographicsSection'
-import type { Company, Establishment } from '@/lib/types/dashboard'
+
+interface Company {
+  id: string
+  nom: string
+  subscription_plan?: string
+  subscription_status?: string
+}
+
+interface Establishment {
+  id: string
+  nom: string
+  code_etablissement?: string
+  is_headquarters?: boolean
+}
 
 export default function CyberDashboard() {
   const [company, setCompany] = useState<Company | null>(null)
   const [selectedEstablishment, setSelectedEstablishment] = useState<Establishment | null>(null)
+  const [establishments, setEstablishments] = useState<Establishment[]>([])
   const [periods, setPeriods] = useState<string[]>([])
   const [selectedPeriod, setSelectedPeriod] = useState<string>('')
   const [showPeriodSelector, setShowPeriodSelector] = useState(false)
@@ -54,27 +68,63 @@ export default function CyberDashboard() {
       setInitialLoading(true)
       setError(null)
 
-// Replace the localStorage session logic with:
-const { data: { user } } = await supabase.auth.getUser()
-if (!user) {
-  router.push('/login')
-  return
-}
+      // Get session from localStorage (token-based)
+      const sessionStr = localStorage.getItem('company_session')
+      if (!sessionStr) {
+        router.push('/login')
+        return
+      }
 
-const { data: companyData, error } = await supabase
-  .from('entreprises')
-  .select(`*, etablissements (*)`)
-  .eq('user_id', user.id) // Use proper user relationship
-  .single()
+      const session = JSON.parse(sessionStr)
+      
+      // Check if session is still valid
+      if (new Date(session.expires_at) < new Date()) {
+        localStorage.removeItem('company_session')
+        document.cookie = 'company_session=; path=/; max-age=0'
+        router.push('/login')
+        return
+      }
+
+      // Validate token and get company data
+      const { data: validationResult, error: validationError } = await supabase
+        .rpc('validate_access_token', { p_token: session.access_token })
+
+      if (validationError || !validationResult?.[0]?.is_valid) {
+        localStorage.removeItem('company_session')
+        router.push('/login')
+        return
+      }
+
+      // Get company and establishments data
+      const { data: companyData, error: companyError } = await supabase
+        .from('entreprises')
+        .select(`
+          id, nom, subscription_plan, subscription_status,
+          etablissements (
+            id, nom, code_etablissement, is_headquarters
+          )
+        `)
+        .eq('id', session.company_id)
+        .single()
+
+      if (companyError) throw companyError
 
       setCompany(companyData)
-      const establishments = companyData.etablissements || []
+      const establishmentsData = companyData.etablissements || []
+      setEstablishments(establishmentsData)
       
-      const defaultEst = establishments.find((e: any) => e.is_headquarters) || establishments[0]
+      const defaultEst = establishmentsData.find((e: any) => e.is_headquarters) || establishmentsData[0]
       if (defaultEst) {
         setSelectedEstablishment(defaultEst)
         await loadPeriodsForEstablishment(defaultEst.id)
       }
+
+      // Update last activity
+      await supabase
+        .from('entreprises')
+        .update({ last_activity_at: new Date().toISOString() })
+        .eq('id', session.company_id)
+
     } catch (err) {
       console.error('Initialize error:', err)
       setError('Erreur d\'initialisation')
@@ -85,7 +135,7 @@ const { data: companyData, error } = await supabase
 
   const loadPeriodsForEstablishment = async (establishmentId: string) => {
     try {
-      // Try optimized tables first, fallback to original
+      // Try optimized snapshot tables first
       const { data: periodData, error } = await supabase
         .from('snapshots_workforce')
         .select('periode')
@@ -93,7 +143,7 @@ const { data: companyData, error } = await supabase
         .order('periode', { ascending: false })
 
       if (error || !periodData?.length) {
-        // Fallback to original table
+        // Fallback to employee data
         const { data: fallbackData, error: fallbackError } = await supabase
           .from('employes')
           .select('periode')
@@ -145,6 +195,12 @@ const { data: companyData, error } = await supabase
     setShowPeriodSelector(false)
   }
 
+  const handleLogout = () => {
+    localStorage.removeItem('company_session')
+    document.cookie = 'company_session=; path=/; max-age=0'
+    router.push('/login')
+  }
+
   // Loading state
   if (initialLoading) {
     return (
@@ -185,12 +241,20 @@ const { data: companyData, error } = await supabase
           <AlertTriangle size={48} className="text-red-400 mx-auto mb-4" />
           <h2 className="text-2xl font-bold text-white mb-4">Erreur de chargement</h2>
           <p className="text-slate-300 mb-6">{error}</p>
-          <button
-            onClick={() => router.push('/import')}
-            className="px-6 py-3 bg-gradient-to-r from-purple-500 to-cyan-500 text-white rounded-xl font-medium hover:opacity-90 transition-opacity"
-          >
-            Importer des données
-          </button>
+          <div className="flex gap-4 justify-center">
+            <button
+              onClick={() => router.push('/import')}
+              className="px-6 py-3 bg-gradient-to-r from-purple-500 to-cyan-500 text-white rounded-xl font-medium hover:opacity-90 transition-opacity"
+            >
+              Importer des données
+            </button>
+            <button
+              onClick={handleLogout}
+              className="px-6 py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-xl font-medium transition-colors"
+            >
+              Se déconnecter
+            </button>
+          </div>
         </motion.div>
       </div>
     )
@@ -280,7 +344,7 @@ const { data: companyData, error } = await supabase
                   <span>•</span>
                   <span>{selectedEstablishment?.nom}</span>
                   <span>•</span>
-                  <span className="text-green-400">Cyber Mode</span>
+                  <span className="text-green-400">Token Mode</span>
                 </motion.div>
               </div>
             </div>
@@ -321,6 +385,15 @@ const { data: companyData, error } = await supabase
                   <Sparkles size={18} />
                   Import
                 </div>
+              </motion.button>
+
+              <motion.button
+                onClick={handleLogout}
+                className="px-4 py-3 bg-slate-800/50 border border-slate-700 text-slate-300 rounded-xl font-medium hover:bg-red-500/20 hover:border-red-500/50 hover:text-red-400 transition-all"
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+              >
+                <LogOut size={18} />
               </motion.button>
             </div>
           </div>
@@ -492,7 +565,7 @@ const { data: companyData, error } = await supabase
             <div className="flex items-center gap-8">
               <div className="flex items-center gap-2">
                 <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
-                <span>Dashboard cyber en temps réel</span>
+                <span>Dashboard token-based en temps réel</span>
               </div>
               <span>Période: {formatPeriodDisplay(selectedPeriod)}</span>
               <span>Mise à jour: {new Date().toLocaleDateString('fr-FR')}</span>

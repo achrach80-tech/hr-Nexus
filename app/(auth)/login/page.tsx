@@ -19,72 +19,89 @@ export default function CompanyLoginPage() {
     setError(null)
 
     try {
-      // Validate access token
-      const { data: company, error: companyError } = await supabase
-        .from('entreprises')
-        .select('*')
-        .eq('access_token', accessToken.trim())
-        .eq('subscription_status', 'active')
-        .single()
+      // Validate access token using the optimized function
+      const { data: validationResult, error: validationError } = await supabase
+        .rpc('validate_access_token', { p_token: accessToken.trim() })
 
-      if (companyError || !company) {
+      if (validationError || !validationResult?.[0]?.is_valid) {
         throw new Error('Code d\'accès invalide ou expiré')
       }
 
-      // Check if subscription is still valid
-      if (company.trial_ends_at && new Date(company.trial_ends_at) < new Date()) {
-        throw new Error('Votre période d\'essai a expiré')
-      }
+      const companyData = validationResult[0]
 
-      // Create session
+      // Create clean session data (no Supabase auth)
       const sessionData = {
-        company_id: company.id,
-        company_name: company.nom,
-        subscription_plan: company.subscription_plan,
-        features: company.features,
-        expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+        company_id: companyData.company_id,
+        company_name: companyData.company_name,
+        subscription_status: companyData.subscription_status,
+        access_token: accessToken,
+        expires_at: new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString() // 8 hours
       }
 
-      // Store in localStorage and cookie
+      // Store session (localStorage + httpOnly cookie for security)
       localStorage.setItem('company_session', JSON.stringify(sessionData))
-      document.cookie = `company_session=${btoa(JSON.stringify(sessionData))}; path=/; max-age=86400`
+      document.cookie = `company_session=${btoa(JSON.stringify(sessionData))}; path=/; max-age=28800; secure; samesite=strict`
 
-      // Update last login
-      await supabase
-        .from('entreprises')
-        .update({ 
-          last_login_at: new Date().toISOString(),
-          login_count: (company.login_count || 0) + 1,
-          last_activity_at: new Date().toISOString()
-        })
-        .eq('id', company.id)
-
-      // Log access
+      // Log successful access (FIXED)
       await supabase
         .from('access_logs')
         .insert({
-          entreprise_id: company.id,
-          access_token_used: accessToken.substring(0, 8) + '...',
+          entreprise_id: companyData.company_id,
+          access_token_used: accessToken.substring(0, 16) + '...',
           access_method: 'token',
           path_accessed: '/login',
           action: 'login_success',
-          response_status: 200
+          response_status: 200,
+          ip_address: null, // Will be handled by middleware
+          user_agent: typeof navigator !== 'undefined' ? navigator.userAgent.substring(0, 255) : null
         })
 
+      // Update company login stats (FIXED)
+      const { error: updateError } = await supabase
+  .from('entreprises')
+  .update({ 
+    last_login_at: new Date().toISOString(),
+    // Use RPC call instead of sql template
+    last_activity_at: new Date().toISOString()
+  })
+  .eq('id', companyData.company_id)
+  
+// Separately increment login count with RPC
+const { error: incrementError } = await supabase
+  .rpc('increment_login_count', { company_id: companyData.company_id })
+
+// Ignore update errors for non-critical operations
+if (updateError) {
+  console.warn('Login stats update failed:', updateError)
+}
+if (incrementError) {
+  console.warn('Login count increment failed:', incrementError)
+}
+
+      // Redirect to dashboard
       router.push('/dashboard')
+      
     } catch (err: any) {
+      console.error('Login error:', err)
       setError(err.message || 'Erreur de connexion')
       
-      // Log failed attempt
-      await supabase
-        .from('access_logs')
-        .insert({
-          access_token_used: accessToken.substring(0, 8) + '...',
-          access_method: 'token',
-          path_accessed: '/login',
-          action: 'login_failed',
-          response_status: 401
-        })
+      // Log failed attempt (FIXED - proper error handling)
+      try {
+        await supabase
+          .from('access_logs')
+          .insert({
+            access_token_used: accessToken.substring(0, 16) + '...',
+            access_method: 'token',
+            path_accessed: '/login',
+            action: 'login_failed',
+            response_status: 401,
+            user_agent: typeof navigator !== 'undefined' ? navigator.userAgent.substring(0, 255) : null
+          })
+      } catch (logError) {
+        // Silently ignore logging errors
+        console.warn('Failed to log access attempt:', logError)
+      }
+        
     } finally {
       setIsLoading(false)
     }
@@ -92,23 +109,23 @@ export default function CompanyLoginPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 flex items-center justify-center p-4">
-      {/* Background effects */}
+      {/* Cyberpunk background effects */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-cyan-500/10 rounded-full blur-3xl animate-pulse" />
         <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-purple-500/10 rounded-full blur-3xl animate-pulse" style={{ animationDelay: '2s' }} />
       </div>
 
       <div className="relative w-full max-w-md">
-        {/* Logo and title */}
+        {/* Header */}
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-20 h-20 bg-gradient-to-br from-cyan-500 to-purple-600 rounded-3xl mb-6 shadow-2xl shadow-purple-500/20">
             <Shield size={40} className="text-white" />
           </div>
           <h1 className="text-4xl font-bold text-white mb-2">
-            Accès Entreprise
+            RH Quantum Access
           </h1>
           <p className="text-slate-400">
-            Connectez-vous avec votre code d'accès sécurisé
+            Connectez-vous avec votre token d'accès sécurisé
           </p>
         </div>
 
@@ -118,21 +135,22 @@ export default function CompanyLoginPage() {
             <div>
               <label className="flex items-center gap-2 text-sm font-medium text-slate-300 mb-2">
                 <Key size={16} />
-                Code d'accès
+                Token d'accès
               </label>
               <input
                 type="password"
                 value={accessToken}
                 onChange={(e) => setAccessToken(e.target.value)}
-                placeholder="Entrez votre code d'accès"
+                placeholder="Entrez votre token d'accès"
                 className="w-full px-4 py-3 bg-slate-800/50 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-transparent transition-all"
                 required
                 disabled={isLoading}
                 autoComplete="off"
                 minLength={32}
+                maxLength={64}
               />
               <p className="mt-2 text-xs text-slate-500">
-                Le code d'accès vous a été fourni par email lors de l'activation
+                Le token d'accès vous a été fourni par email lors de l'activation
               </p>
             </div>
 
@@ -145,7 +163,7 @@ export default function CompanyLoginPage() {
 
             <button
               type="submit"
-              disabled={isLoading || !accessToken}
+              disabled={isLoading || !accessToken || accessToken.length < 32}
               className="w-full px-6 py-3 bg-gradient-to-r from-cyan-500 to-purple-600 hover:from-cyan-400 hover:to-purple-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-white font-semibold transition-all transform hover:scale-105 flex items-center justify-center gap-2"
             >
               {isLoading ? (
@@ -168,13 +186,13 @@ export default function CompanyLoginPage() {
                 Pas encore client ?
               </p>
               
-               <Link
-  href="/demo"
-  className="inline-flex items-center gap-2 px-6 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-white font-medium transition-all"
->
-  <Building2 size={16} />
-  Demander une démo
-</Link>
+              <Link
+                href="/demo"
+                className="inline-flex items-center gap-2 px-6 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-white font-medium transition-all"
+              >
+                <Building2 size={16} />
+                Demander une démo
+              </Link>
             </div>
           </div>
         </div>

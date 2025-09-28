@@ -30,18 +30,32 @@ export default function DemoRequestPage() {
     setError(null)
 
     try {
-      const { error: insertError } = await supabase
-        .from('demo_requests')
-        .insert({
-          ...formData,
-          status: 'pending',
-          country: 'France'
+      // Utiliser la fonction SQL sécurisée pour insérer la démo
+      const { data, error: submitError } = await supabase
+        .rpc('submit_demo_request', {
+          p_company_name: formData.company_name,
+          p_contact_name: formData.contact_name,
+          p_email: formData.email,
+          p_phone: formData.phone || null,
+          p_employee_count: formData.employee_count || null,
+          p_industry: formData.industry || null,
+          p_message: formData.message || null
         })
 
-      if (insertError) throw insertError
+      if (submitError) {
+        console.error('Demo submission error:', submitError)
+        throw new Error(submitError.message || 'Erreur lors de l\'envoi')
+      }
 
-      setIsSuccess(true)
+      if (data) {
+        setIsSuccess(true)
+        console.log('Demo request submitted with ID:', data)
+      } else {
+        throw new Error('Aucune réponse du serveur')
+      }
+
     } catch (err: any) {
+      console.error('Submit error:', err)
       setError(err.message || 'Une erreur est survenue')
     } finally {
       setIsSubmitting(false)
@@ -59,15 +73,15 @@ export default function DemoRequestPage() {
             Demande envoyée !
           </h2>
           <p className="text-slate-300 mb-8">
-  Notre équipe vous contactera dans les 24h pour planifier votre démonstration personnalisée.
-</p>
-<Link
-  href="/"
-  className="inline-flex items-center justify-center gap-2 px-8 py-4 bg-gradient-to-r from-cyan-500 to-purple-600 hover:from-cyan-400 hover:to-purple-500 rounded-xl text-white font-semibold transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-xl"
->
-  Retour à l'accueil
-  <ArrowRight size={20} />
-</Link>
+            Notre équipe vous contactera dans les 24h pour planifier votre démonstration personnalisée.
+          </p>
+          <Link
+            href="/"
+            className="inline-flex items-center justify-center gap-2 px-8 py-4 bg-gradient-to-r from-cyan-500 to-purple-600 hover:from-cyan-400 hover:to-purple-500 rounded-xl text-white font-semibold transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-xl"
+          >
+            Retour à l'accueil
+            <ArrowRight size={20} />
+          </Link>
         </div>
       </div>
     )
@@ -102,6 +116,7 @@ export default function DemoRequestPage() {
                   value={formData.company_name}
                   onChange={(e) => setFormData({...formData, company_name: e.target.value})}
                   className="w-full px-4 py-3 bg-slate-800/50 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                  placeholder="Votre Entreprise"
                 />
               </div>
 
@@ -117,6 +132,7 @@ export default function DemoRequestPage() {
                   value={formData.contact_name}
                   onChange={(e) => setFormData({...formData, contact_name: e.target.value})}
                   className="w-full px-4 py-3 bg-slate-800/50 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                  placeholder="John Doe"
                 />
               </div>
 
@@ -132,6 +148,7 @@ export default function DemoRequestPage() {
                   value={formData.email}
                   onChange={(e) => setFormData({...formData, email: e.target.value})}
                   className="w-full px-4 py-3 bg-slate-800/50 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                  placeholder="vous@entreprise.com"
                 />
               </div>
 
@@ -146,6 +163,7 @@ export default function DemoRequestPage() {
                   value={formData.phone}
                   onChange={(e) => setFormData({...formData, phone: e.target.value})}
                   className="w-full px-4 py-3 bg-slate-800/50 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                  placeholder="+33 1 23 45 67 89"
                 />
               </div>
 
@@ -203,14 +221,15 @@ export default function DemoRequestPage() {
 
             {error && (
               <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400">
-                {error}
+                <p className="font-medium">Erreur:</p>
+                <p className="text-sm mt-1">{error}</p>
               </div>
             )}
 
             <button
               type="submit"
               disabled={isSubmitting}
-              className="w-full px-6 py-4 bg-gradient-to-r from-cyan-500 to-purple-600 hover:from-cyan-400 hover:to-purple-500 disabled:opacity-50 rounded-xl text-white font-semibold transition-all transform hover:scale-105 flex items-center justify-center gap-2"
+              className="w-full px-6 py-4 bg-gradient-to-r from-cyan-500 to-purple-600 hover:from-cyan-400 hover:to-purple-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-white font-semibold transition-all transform hover:scale-105 flex items-center justify-center gap-2"
             >
               {isSubmitting ? (
                 <>
