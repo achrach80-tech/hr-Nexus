@@ -73,45 +73,31 @@ const loadDemos = async () => {
     loadDemos()
   }
 
-// Updated createCompanyFromDemo function in app/admin/demos/page.tsx
-
 const createCompanyFromDemo = async (demo: any) => {
   setCreatingCompany(demo.id)
   
   try {
-    // Generate secure temporary password
-    const tempPassword = generateSecurePassword()
+    // Generate secure credentials
+    const accessToken = Array.from(crypto.getRandomValues(new Uint8Array(32)))
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('')
+    
     const companyCode = `RHQ-${Date.now().toString(36).toUpperCase()}`
     
-    console.log('Creating Supabase user for:', demo.email)
-
-    // Step 1: Create Supabase user account (requires admin privileges)
-    const { data: authUser, error: authError } = await supabase.auth.admin.createUser({
-      email: demo.email,
-      password: tempPassword,
-      email_confirm: true, // Skip email confirmation for admin-created accounts
-      user_metadata: {
-        company_name: demo.company_name,
-        contact_name: demo.contact_name,
-        created_by_admin: true,
-        created_from_demo: demo.id
-      }
+    console.log('Creating company with data:', { 
+      nom: demo.company_name,
+      code_entreprise: companyCode,
+      access_token: accessToken,
+      billing_email: demo.email
     })
 
-    if (authError) {
-      console.error('Auth user creation error:', authError)
-      throw new Error(`Failed to create user account: ${authError.message}`)
-    }
-
-    console.log('Supabase user created:', authUser.user.id)
-
-    // Step 2: Create company linked to this user
+    // Create company (matching clean schema exactly)
     const { data: company, error: companyError } = await supabase
       .from('entreprises')
       .insert({
-        user_id: authUser.user.id, // Link to Supabase user
         nom: demo.company_name,
         code_entreprise: companyCode,
+        access_token: accessToken,
         subscription_plan: 'trial',
         subscription_status: 'active',
         billing_email: demo.email,
@@ -119,7 +105,6 @@ const createCompanyFromDemo = async (demo: any) => {
         max_employees: demo.employee_count === '1-50' ? 100 : 
                        demo.employee_count === '51-200' ? 300 :
                        demo.employee_count === '201-500' ? 600 : 1000
-        // Remove access_token - no longer needed
       })
       .select()
       .single()
@@ -129,7 +114,9 @@ const createCompanyFromDemo = async (demo: any) => {
       throw new Error(`Company creation failed: ${companyError.message}`)
     }
 
-    // Step 3: Create default establishment
+    console.log('Company created:', company)
+
+    // Create default establishment (matching clean schema)
     const { data: establishment, error: estError } = await supabase
       .from('etablissements')
       .insert({
@@ -137,7 +124,7 @@ const createCompanyFromDemo = async (demo: any) => {
         nom: `${demo.company_name} - Siège`,
         code_etablissement: 'SIEGE',
         is_headquarters: true,
-        is_active: true
+        statut: 'Actif'
       })
       .select()
       .single()
@@ -147,17 +134,21 @@ const createCompanyFromDemo = async (demo: any) => {
       throw new Error(`Establishment creation failed: ${estError.message}`)
     }
 
-    // Step 4: Setup default referentials
-    const { error: refError } = await supabase.rpc(
+    console.log('Establishment created:', establishment)
+
+    // Setup default referentials using the function from clean schema
+    const { data: refData, error: refError } = await supabase.rpc(
       'setup_default_referentials', 
       { p_etablissement_id: establishment.id }
     )
 
     if (refError) {
+      console.error('Referentials setup error:', refError)
+      // Don't throw here - this is not critical for company creation
       console.warn('Referentials setup failed, but company was created successfully')
     }
 
-    // Step 5: Update demo status
+    // Update demo status to converted
     const { error: updateError } = await supabase
       .from('demo_requests')
       .update({
@@ -169,36 +160,39 @@ const createCompanyFromDemo = async (demo: any) => {
 
     if (updateError) {
       console.error('Demo update error:', updateError)
+      // Don't throw - company was created successfully
     }
 
-    // Show success modal with login credentials (not token)
-    showSuccessModalWithCredentials(demo, tempPassword, company)
+    // Show success modal with credentials
+  // Show success modal with credentials
+    showSuccessModal(demo, accessToken, company)
     
-    // Reload demos
+    // Reset filter to 'all' and reload with delay
+    console.log('Resetting filter and reloading demos...')
     setFilter('all')
-    setTimeout(() => loadDemos(), 1000)
+    setTimeout(() => {
+      console.log('Executing delayed reload...')
+      loadDemos()
+    }, 1000)
     
   } catch (error) {
     console.error('Error creating company:', error)
-    alert(`Error creating company: ${error instanceof Error ? error.message : 'Unknown error'}`)
+    
+    // Better error handling
+    let errorMessage = 'Unknown error occurred'
+    if (error instanceof Error) {
+      errorMessage = error.message
+    } else if (typeof error === 'object' && error !== null) {
+      errorMessage = JSON.stringify(error)
+    }
+    
+    alert(`Error creating company: ${errorMessage}`)
   } finally {
     setCreatingCompany(null)
   }
 }
 
-// Helper function to generate secure password
-const generateSecurePassword = (): string => {
-  const length = 12
-  const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*"
-  let password = ""
-  for (let i = 0; i < length; i++) {
-    password += charset.charAt(Math.floor(Math.random() * charset.length))
-  }
-  return password
-}
-
-// Updated success modal to show email/password instead of token
-const showSuccessModalWithCredentials = (demo: any, password: string, company: any) => {
+const showSuccessModal = (demo: any, token: string, company: any) => {
   const modal = document.createElement('div')
   modal.id = 'success-modal'
   modal.className = 'fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4'
@@ -213,7 +207,7 @@ const showSuccessModalWithCredentials = (demo: any, password: string, company: a
         </div>
         <div>
           <h2 class="text-3xl font-bold text-white">Company Created!</h2>
-          <p class="text-gray-400">${demo.company_name} account is ready</p>
+          <p class="text-gray-400">${demo.company_name} is now active</p>
         </div>
       </div>
       
@@ -221,30 +215,20 @@ const showSuccessModalWithCredentials = (demo: any, password: string, company: a
         <div class="bg-gray-800/50 rounded-2xl p-6 border border-gray-700">
           <div class="flex items-center gap-2 text-gray-400 text-sm mb-3">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 12a4 4 0 10-8 0 4 4 0 008 0zm0 0v1.5a2.5 2.5 0 005 0V12a9 9 0 10-9 9m4.5-1.206a8.959 8.959 0 01-4.5 1.207"></path>
-            </svg>
-            Login Email
-          </div>
-          <p class="text-white font-mono text-lg">${demo.email}</p>
-        </div>
-        
-        <div class="bg-gray-800/50 rounded-2xl p-6 border border-gray-700">
-          <div class="flex items-center gap-2 text-gray-400 text-sm mb-3">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path>
             </svg>
-            Temporary Password
+            Access Token
           </div>
           <div class="flex gap-2">
             <input 
               type="text" 
-              value="${password}" 
+              value="${token}" 
               readonly 
               class="flex-1 px-4 py-3 bg-gray-900 border border-gray-600 rounded-xl text-white font-mono text-sm"
-              id="password-input"
+              id="token-input"
             />
             <button 
-              onclick="copyToClipboard('${password}')"
+              onclick="copyToClipboard('${token}')"
               class="px-6 py-3 bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/30 rounded-xl text-purple-400 font-medium transition-all"
               id="copy-btn"
             >
@@ -265,16 +249,16 @@ const showSuccessModalWithCredentials = (demo: any, password: string, company: a
         </div>
         
         <div class="bg-blue-500/10 border border-blue-500/30 rounded-xl p-4">
-          <h4 class="text-blue-400 font-semibold mb-2">Email Template Ready</h4>
-          <p class="text-gray-300 text-sm mb-3">Send to ${demo.email}:</p>
+          <h4 class="text-blue-400 font-semibold mb-2">Ready to Send</h4>
+          <p class="text-gray-300 text-sm mb-3">Email template for ${demo.email}:</p>
           <div class="bg-gray-900/50 rounded-lg p-3 text-xs text-gray-300">
             Subject: Your RH Quantum Account is Ready!<br><br>
             Hi ${demo.contact_name},<br><br>
             Your RH Quantum analytics platform is now active!<br><br>
             🔗 Login: ${window.location.origin}/login<br>
-            📧 Email: ${demo.email}<br>
-            🔑 Temporary Password: ${password}<br><br>
-            Please change your password after first login.<br><br>
+            🔑 Access Token: ${token}<br><br>
+            Start by importing your HR data to see instant insights.<br><br>
+            Need help? Reply to this email.<br><br>
             The RH Quantum Team
           </div>
         </div>
@@ -288,7 +272,7 @@ const showSuccessModalWithCredentials = (demo: any, password: string, company: a
           Close
         </button>
         <button 
-          onclick="sendLoginCredentials('${demo.email}', '${demo.contact_name}', '${password}')"
+          onclick="sendCredentialsEmail('${demo.email}', '${demo.contact_name}', '${token}')"
           class="flex-1 px-6 py-3 bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-400 hover:to-cyan-400 rounded-xl text-white font-semibold transition-all flex items-center justify-center gap-2"
         >
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -302,7 +286,7 @@ const showSuccessModalWithCredentials = (demo: any, password: string, company: a
   
   document.body.appendChild(modal)
   
-  // Helper functions
+  // Add helper functions to window
   ;(window as any).copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text)
     const btn = document.getElementById('copy-btn')
@@ -312,9 +296,10 @@ const showSuccessModalWithCredentials = (demo: any, password: string, company: a
     }
   }
   
-  ;(window as any).sendLoginCredentials = (email: string, name: string, password: string) => {
-    console.log('Sending credentials to:', { email, name, password })
-    alert(`Login credentials sent to ${email}!`)
+  ;(window as any).sendCredentialsEmail = (email: string, name: string, token: string) => {
+    // This would integrate with your email service
+    console.log('Sending credentials to:', { email, name, token })
+    alert(`Credentials sent to ${email}! (In production, integrate with your email service)`)
     document.getElementById('success-modal')?.remove()
   }
 }
